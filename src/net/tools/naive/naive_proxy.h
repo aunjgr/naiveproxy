@@ -6,7 +6,6 @@
 #ifndef NET_TOOLS_NAIVE_NAIVE_PROXY_H_
 #define NET_TOOLS_NAIVE_NAIVE_PROXY_H_
 
-#include <map>
 #include <memory>
 #include <vector>
 
@@ -18,6 +17,7 @@
 #include "net/ssl/ssl_config.h"
 #include "net/tools/naive/naive_connection.h"
 #include "net/tools/naive/naive_protocol.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 
 namespace net {
 
@@ -78,7 +78,8 @@ class NaiveProxy {
 
   std::vector<NetworkIsolationKey> network_isolation_keys_;
 
-  std::map<unsigned int, std::unique_ptr<NaiveConnection>> connection_by_id_;
+  absl::flat_hash_map<unsigned int, std::unique_ptr<NaiveConnection>>
+      connection_by_id_;
 
   const NetworkTrafficAnnotationTag& traffic_annotation_;
 

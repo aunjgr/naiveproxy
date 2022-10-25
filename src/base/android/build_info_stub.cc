@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <cstdlib>
+#include <sys/system_properties.h>
 
 #include "base/android/build_info.h"
 #include "base/notreached.h"

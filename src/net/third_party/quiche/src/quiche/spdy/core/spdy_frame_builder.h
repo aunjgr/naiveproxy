@@ -102,6 +102,8 @@ class QUICHE_EXPORT_PRIVATE SpdyFrameBuilder {
   bool WriteStringPiece32(const absl::string_view value);
   bool WriteBytes(const void* data, uint32_t data_len);
 
+  bool WriteEmptyBytes(uint32_t data_len);
+
  private:
   friend class test::SpdyFrameBuilderPeer;
 

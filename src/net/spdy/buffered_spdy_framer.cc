@@ -11,6 +11,7 @@
 #include "base/strings/abseil_string_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/trace_event/memory_usage_estimator.h"
+#include "net/third_party/quiche/src/quiche/spdy/core/array_output_buffer.h"
 
 namespace net {
 
@@ -253,10 +254,27 @@ bool BufferedSpdyFramer::HasError() {
 // spdy::SpdyRstStreamIR).
 std::unique_ptr<spdy::SpdySerializedFrame> BufferedSpdyFramer::CreateRstStream(
     spdy::SpdyStreamId stream_id,
-    spdy::SpdyErrorCode error_code) const {
+    spdy::SpdyErrorCode error_code,
+    uint32_t padding_len) const {
   spdy::SpdyRstStreamIR rst_ir(stream_id, error_code);
-  return std::make_unique<spdy::SpdySerializedFrame>(
-      spdy_framer_.SerializeRstStream(rst_ir));
+  if (padding_len == 0) {
+    return std::make_unique<spdy::SpdySerializedFrame>(
+        spdy_framer_.SerializeRstStream(rst_ir));
+  } else {
+    spdy::SpdyDataIR data_ir(stream_id, nullptr);
+    data_ir.set_fin(true);
+    data_ir.set_padding_len(padding_len);
+
+    size_t frame_size = data_ir.size() + rst_ir.size();
+    auto frame_data = std::make_unique<char[]>(frame_size);
+    spdy::ArrayOutputBuffer output(frame_data.get(), frame_size);
+
+    spdy_framer_.SerializeData(data_ir, &output);
+    spdy_framer_.SerializeRstStream(rst_ir, &output);
+
+    return std::make_unique<spdy::SpdySerializedFrame>(
+        frame_data.release(), frame_size, /* owns_buffer = */ true);
+  }
 }
 
 // TODO(jgraettinger): Eliminate uses of this method (prefer
@@ -296,9 +314,13 @@ std::unique_ptr<spdy::SpdySerializedFrame> BufferedSpdyFramer::CreateDataFrame(
     spdy::SpdyStreamId stream_id,
     const char* data,
     uint32_t len,
+    uint32_t padding_len,
     spdy::SpdyDataFlags flags) {
   spdy::SpdyDataIR data_ir(stream_id, absl::string_view(data, len));
   data_ir.set_fin((flags & spdy::DATA_FLAG_FIN) != 0);
+  if (padding_len > 0) {
+    data_ir.set_padding_len(padding_len);
+  }
   return std::make_unique<spdy::SpdySerializedFrame>(
       spdy_framer_.SerializeData(data_ir));
 }

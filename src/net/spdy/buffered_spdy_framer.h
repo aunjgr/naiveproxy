@@ -221,7 +221,8 @@ class NET_EXPORT_PRIVATE BufferedSpdyFramer
   bool HasError();
   std::unique_ptr<spdy::SpdySerializedFrame> CreateRstStream(
       spdy::SpdyStreamId stream_id,
-      spdy::SpdyErrorCode error_code) const;
+      spdy::SpdyErrorCode error_code,
+      uint32_t padding_len = 0) const;
   std::unique_ptr<spdy::SpdySerializedFrame> CreateSettings(
       const spdy::SettingsMap& values) const;
   std::unique_ptr<spdy::SpdySerializedFrame> CreatePingFrame(
@@ -234,6 +235,7 @@ class NET_EXPORT_PRIVATE BufferedSpdyFramer
       spdy::SpdyStreamId stream_id,
       const char* data,
       uint32_t len,
+      uint32_t padding_len,
       spdy::SpdyDataFlags flags);
   std::unique_ptr<spdy::SpdySerializedFrame> CreatePriority(
       spdy::SpdyStreamId stream_id,
