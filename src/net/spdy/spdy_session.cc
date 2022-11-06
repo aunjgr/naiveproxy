@@ -1242,6 +1242,7 @@ int SpdySession::ConfirmHandshake(CompletionOnceCallback callback) {
 std::unique_ptr<spdy::SpdySerializedFrame> SpdySession::CreateHeaders(
     spdy::SpdyStreamId stream_id,
     RequestPriority priority,
+    int padding_len,
     spdy::SpdyControlFlags flags,
     spdy::Http2HeaderBlock block,
     NetLogSource source_dependency) {
@@ -1277,6 +1278,9 @@ std::unique_ptr<spdy::SpdySerializedFrame> SpdySession::CreateHeaders(
   headers.set_parent_stream_id(parent_stream_id);
   headers.set_exclusive(exclusive);
   headers.set_fin((flags & spdy::CONTROL_FLAG_FIN) != 0);
+  if (padding_len > 0) {
+    headers.set_padding_len(padding_len);
+  }
 
   streams_initiated_count_++;
 
@@ -1290,6 +1294,7 @@ std::unique_ptr<SpdyBuffer> SpdySession::CreateDataBuffer(
     int len,
     spdy::SpdyDataFlags flags,
     int* effective_len,
+    int* padding_len,
     bool* end_stream) {
   if (availability_state_ == STATE_DRAINING) {
     return nullptr;
@@ -1305,7 +1310,7 @@ std::unique_ptr<SpdyBuffer> SpdySession::CreateDataBuffer(
     return nullptr;
   }
 
-  *effective_len = std::min(len, kMaxSpdyFrameChunkSize);
+  *effective_len = std::min(len, kMaxSpdyFrameChunkSize - *padding_len);
 
   bool send_stalled_by_stream = (stream->send_window_size() <= 0);
   bool send_stalled_by_session = IsSendStalled();
@@ -1346,6 +1351,8 @@ std::unique_ptr<SpdyBuffer> SpdySession::CreateDataBuffer(
   }
 
   *effective_len = std::min(*effective_len, stream->send_window_size());
+  *padding_len =
+      std::min(*padding_len, stream->send_window_size() - *effective_len);
 
   // Obey send window size of the session.
   if (send_stalled_by_session) {
@@ -1358,6 +1365,8 @@ std::unique_ptr<SpdyBuffer> SpdySession::CreateDataBuffer(
   }
 
   *effective_len = std::min(*effective_len, session_send_window_size_);
+  *padding_len =
+      std::min(*padding_len, session_send_window_size_ - *effective_len);
 
   DCHECK_GE(*effective_len, 0);
 
@@ -1376,9 +1385,11 @@ std::unique_ptr<SpdyBuffer> SpdySession::CreateDataBuffer(
   std::unique_ptr<spdy::SpdySerializedFrame> frame(
       buffered_spdy_framer_->CreateDataFrame(
           stream_id, data->data(), static_cast<uint32_t>(*effective_len),
-          flags));
+          static_cast<uint32_t>(*padding_len), flags));
 
   auto data_buffer = std::make_unique<SpdyBuffer>(std::move(frame));
+
+  *effective_len += *padding_len;
 
   // Send window size is based on payload size, so nothing to do if this is
   // just a FIN with no payload.
@@ -2274,28 +2285,14 @@ void SpdySession::EnqueueResetStreamFrame(spdy::SpdyStreamId stream_id,
   });
 
   DCHECK(buffered_spdy_framer_.get());
-  std::unique_ptr<spdy::SpdySerializedFrame> rst_frame(
-      buffered_spdy_framer_->CreateRstStream(stream_id, error_code));
-  // Can't send padding if the send window is very tight.
-  if (session_send_window_size_ >= 72) {
-    constexpr int kNonPaddingSize =
-        spdy::kDataFrameMinimumSize + spdy::kRstStreamFrameSize;
-    uint8_t padding_length = base::RandInt(48, 72) - kNonPaddingSize;
-    size_t expected_length = kNonPaddingSize + padding_length;
-    spdy::SpdyFrameBuilder builder(expected_length);
-    builder.BeginNewFrame(spdy::SpdyFrameType::DATA,
-                          spdy::DATA_FLAG_FIN | spdy::DATA_FLAG_PADDED,
-                          stream_id, padding_length);
-    builder.WriteUInt8(padding_length - 1);
-    std::string padding(padding_length - 1, 0);
-    builder.WriteBytes(padding.data(), padding.size());
-    builder.BeginNewFrame(spdy::SpdyFrameType::RST_STREAM, 0, stream_id, 4);
-    builder.WriteUInt32(error_code);
-    DCHECK_EQ(expected_length, builder.length());
-    rst_frame = std::make_unique<spdy::SpdySerializedFrame>(builder.take());
-    DecreaseSendWindowSize(padding_length);
-  }
+  int padding_len = base::RandInt(48, 72) - spdy::kDataFrameMinimumSize;
+  padding_len = std::min(padding_len, session_send_window_size_);
 
+  std::unique_ptr<spdy::SpdySerializedFrame> rst_frame(
+      buffered_spdy_framer_->CreateRstStream(stream_id, error_code,
+                                             padding_len));
+
+  DecreaseSendWindowSize(padding_len);
   EnqueueSessionWrite(priority, spdy::SpdyFrameType::RST_STREAM,
                       std::move(rst_frame));
   RecordProtocolErrorHistogram(MapRstStreamStatusToProtocolError(error_code));
@@ -3729,7 +3726,7 @@ void SpdySession::IncreaseRecvWindowSize(int32_t delta_window_size) {
   session_unacked_recv_window_bytes_ += delta_window_size;
   const base::TimeDelta elapsed =
       base::TimeTicks::Now() - last_recv_window_update_;
-  if (session_unacked_recv_window_bytes_ > session_max_recv_window_size_ / 2 ||
+  if (session_unacked_recv_window_bytes_ > session_max_recv_window_size_ / 4 ||
       elapsed >= time_to_buffer_small_window_updates_) {
     last_recv_window_update_ = base::TimeTicks::Now();
     SendWindowUpdateFrame(spdy::kSessionFlowControlStreamId,
