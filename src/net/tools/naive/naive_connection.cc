@@ -45,15 +45,11 @@ namespace net {
 
 namespace {
 constexpr int kBufferSize = 64 * 1024;
-constexpr int kFirstPaddings = 8;
-constexpr int kPaddingHeaderSize = 3;
-constexpr int kMaxPaddingSize = 255;
 }  // namespace
 
 NaiveConnection::NaiveConnection(
     unsigned int id,
     ClientProtocol protocol,
-    std::unique_ptr<PaddingDetectorDelegate> padding_detector_delegate,
     const ProxyInfo& proxy_info,
     const SSLConfig& server_ssl_config,
     const SSLConfig& proxy_ssl_config,
@@ -65,7 +61,6 @@ NaiveConnection::NaiveConnection(
     const NetworkTrafficAnnotationTag& traffic_annotation)
     : id_(id),
       protocol_(protocol),
-      padding_detector_delegate_(std::move(padding_detector_delegate)),
       proxy_info_(proxy_info),
       server_ssl_config_(server_ssl_config),
       proxy_ssl_config_(proxy_ssl_config),
@@ -82,10 +77,11 @@ NaiveConnection::NaiveConnection(
       early_pull_pending_(false),
       can_push_to_server_(false),
       early_pull_result_(ERR_IO_PENDING),
-      num_paddings_{0, 0},
-      read_padding_state_(STATE_READ_PAYLOAD_LENGTH_1),
       full_duplex_(false),
       time_func_(&base::TimeTicks::Now),
+      start_time_(time_func_()),
+      bytes_received_(0),
+      bytes_sent_(0),
       traffic_annotation_(traffic_annotation) {
   io_callback_ = base::BindRepeating(&NaiveConnection::OnIOComplete,
                                      weak_ptr_factory_.GetWeakPtr());
@@ -181,17 +177,6 @@ int NaiveConnection::DoConnectClientComplete(int result) {
   if (result < 0)
     return result;
 
-  // For proxy client sockets, padding support detection is finished after the
-  // first server response which means there will be one missed early pull. For
-  // proxy server sockets (HttpProxySocket), padding support detection is
-  // done during client connect, so there shouldn't be any missed early pull.
-  if (!padding_detector_delegate_->IsPaddingSupportKnown()) {
-    early_pull_pending_ = false;
-    early_pull_result_ = 0;
-    next_state_ = STATE_CONNECT_SERVER;
-    return OK;
-  }
-
   early_pull_pending_ = true;
   Pull(kClient, kServer);
   if (early_pull_result_ != ERR_IO_PENDING) {
@@ -213,11 +198,8 @@ int NaiveConnection::DoConnectServer() {
     const auto* socket =
         static_cast<const Socks5ServerSocket*>(client_socket_.get());
     origin = socket->request_endpoint();
-  } else if (protocol_ == ClientProtocol::kHttp) {
-    const auto* socket =
-        static_cast<const HttpProxySocket*>(client_socket_.get());
-    origin = socket->request_endpoint();
-  } else if (protocol_ == ClientProtocol::kRedir) {
+  } else if (protocol_ == ClientProtocol::kRedir ||
+             protocol_ == ClientProtocol::kTproxy) {
 #if BUILDFLAG(IS_LINUX)
     const auto* socket =
         static_cast<const TCPClientSocket*>(client_socket_.get());
@@ -232,11 +214,19 @@ int NaiveConnection::DoConnectServer() {
     SockaddrStorage dst;
     if (peer_endpoint.GetFamily() == ADDRESS_FAMILY_IPV4 ||
         peer_endpoint.address().IsIPv4MappedIPv6()) {
-      rv = getsockopt(sd, SOL_IP, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      if (protocol_ == ClientProtocol::kRedir) {
+        rv = getsockopt(sd, SOL_IP, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      } else {
+        rv = getsockname(sd, dst.addr, &dst.addr_len);
+      }
     } else {
-      rv = getsockopt(sd, SOL_IPV6, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      if (protocol_ == ClientProtocol::kRedir) {
+        rv = getsockopt(sd, SOL_IPV6, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      } else {
+        rv = getsockname(sd, dst.addr, &dst.addr_len);
+      }
     }
-    if (rv == 0) {
+    if (rv == OK) {
       IPEndPoint ipe;
       if (ipe.FromSockAddr(dst.addr, dst.addr_len)) {
         const auto& addr = ipe.address();
@@ -270,11 +260,15 @@ int NaiveConnection::DoConnectServer() {
     return ERR_ADDRESS_INVALID;
   }
 
-  LOG(INFO) << "Connection " << id_ << " to " << origin.ToString();
+  IPEndPoint src;
+  client_socket_->GetPeerAddress(&src);
+
+  LOG(INFO) << "Connection " << id_ << " from " << src.ToString() << " to "
+            << origin.ToString();
 
   // Ignores socket limit set by socket pool for this type of socket.
   return InitSocketHandleForRawConnect2(
-      std::move(endpoint), LOAD_IGNORE_LIMITS, MAXIMUM_PRIORITY, session_,
+      std::move(endpoint), LOAD_IGNORE_LIMITS, DEFAULT_PRIORITY, session_,
       proxy_info_, server_ssl_config_, proxy_ssl_config_, PRIVACY_MODE_DISABLED,
       network_anonymization_key_, net_log_, server_socket_handle_.get(),
       io_callback_);
@@ -331,16 +325,7 @@ void NaiveConnection::Pull(Direction from, Direction to) {
     return;
 
   int read_size = kBufferSize;
-  auto padding_direction = padding_detector_delegate_->GetPaddingDirection();
-  if (from == padding_direction && num_paddings_[from] < kFirstPaddings) {
-    auto buffer = base::MakeRefCounted<GrowableIOBuffer>();
-    buffer->SetCapacity(kBufferSize);
-    buffer->set_offset(kPaddingHeaderSize);
-    read_buffers_[from] = buffer;
-    read_size = kBufferSize - kPaddingHeaderSize - kMaxPaddingSize;
-  } else {
-    read_buffers_[from] = base::MakeRefCounted<IOBuffer>(kBufferSize);
-  }
+  read_buffers_[from] = base::MakeRefCounted<IOBuffer>(kBufferSize);
 
   DCHECK(sockets_[from]);
   int rv = sockets_[from]->Read(
@@ -358,96 +343,6 @@ void NaiveConnection::Pull(Direction from, Direction to) {
 void NaiveConnection::Push(Direction from, Direction to, int size) {
   int write_size = size;
   int write_offset = 0;
-  auto padding_direction = padding_detector_delegate_->GetPaddingDirection();
-  if (from == padding_direction && num_paddings_[from] < kFirstPaddings) {
-    // Adds padding.
-    ++num_paddings_[from];
-    int padding_size = base::RandInt(0, kMaxPaddingSize);
-    auto* buffer = static_cast<GrowableIOBuffer*>(read_buffers_[from].get());
-    buffer->set_offset(0);
-    uint8_t* p = reinterpret_cast<uint8_t*>(buffer->data());
-    p[0] = size / 256;
-    p[1] = size % 256;
-    p[2] = padding_size;
-    std::memset(p + kPaddingHeaderSize + size, 0, padding_size);
-    write_size = kPaddingHeaderSize + size + padding_size;
-  } else if (to == padding_direction && num_paddings_[from] < kFirstPaddings) {
-    // Removes padding.
-    const char* p = read_buffers_[from]->data();
-    bool trivial_padding = false;
-    if (read_padding_state_ == STATE_READ_PAYLOAD_LENGTH_1 &&
-        size >= kPaddingHeaderSize) {
-      int payload_size =
-          static_cast<uint8_t>(p[0]) * 256 + static_cast<uint8_t>(p[1]);
-      int padding_size = static_cast<uint8_t>(p[2]);
-      if (size == kPaddingHeaderSize + payload_size + padding_size) {
-        write_size = payload_size;
-        write_offset = kPaddingHeaderSize;
-        ++num_paddings_[from];
-        trivial_padding = true;
-      }
-    }
-    if (!trivial_padding) {
-      auto unpadded_buffer = base::MakeRefCounted<IOBuffer>(kBufferSize);
-      char* unpadded_ptr = unpadded_buffer->data();
-      for (int i = 0; i < size;) {
-        if (num_paddings_[from] >= kFirstPaddings &&
-            read_padding_state_ == STATE_READ_PAYLOAD_LENGTH_1) {
-          std::memcpy(unpadded_ptr, p + i, size - i);
-          unpadded_ptr += size - i;
-          break;
-        }
-        int copy_size;
-        switch (read_padding_state_) {
-          case STATE_READ_PAYLOAD_LENGTH_1:
-            payload_length_ = static_cast<uint8_t>(p[i]);
-            ++i;
-            read_padding_state_ = STATE_READ_PAYLOAD_LENGTH_2;
-            break;
-          case STATE_READ_PAYLOAD_LENGTH_2:
-            payload_length_ =
-                payload_length_ * 256 + static_cast<uint8_t>(p[i]);
-            ++i;
-            read_padding_state_ = STATE_READ_PADDING_LENGTH;
-            break;
-          case STATE_READ_PADDING_LENGTH:
-            padding_length_ = static_cast<uint8_t>(p[i]);
-            ++i;
-            read_padding_state_ = STATE_READ_PAYLOAD;
-            break;
-          case STATE_READ_PAYLOAD:
-            if (payload_length_ <= size - i) {
-              copy_size = payload_length_;
-              read_padding_state_ = STATE_READ_PADDING;
-            } else {
-              copy_size = size - i;
-            }
-            std::memcpy(unpadded_ptr, p + i, copy_size);
-            unpadded_ptr += copy_size;
-            i += copy_size;
-            payload_length_ -= copy_size;
-            break;
-          case STATE_READ_PADDING:
-            if (padding_length_ <= size - i) {
-              copy_size = padding_length_;
-              read_padding_state_ = STATE_READ_PAYLOAD_LENGTH_1;
-              ++num_paddings_[from];
-            } else {
-              copy_size = size - i;
-            }
-            i += copy_size;
-            padding_length_ -= copy_size;
-            break;
-        }
-      }
-      write_size = unpadded_ptr - unpadded_buffer->data();
-      read_buffers_[from] = unpadded_buffer;
-    }
-    if (write_size == 0) {
-      OnPushComplete(from, to, OK);
-      return;
-    }
-  }
 
   write_buffers_[to] = base::MakeRefCounted<DrainableIOBuffer>(
       std::move(read_buffers_[from]), write_offset + write_size);
@@ -532,11 +427,17 @@ void NaiveConnection::OnPullComplete(Direction from, Direction to, int result) {
   if (from == kClient && !can_push_to_server_)
     return;
 
+  if (to == kClient)
+    bytes_received_ += result;
+
   Push(from, to, result);
 }
 
 void NaiveConnection::OnPushComplete(Direction from, Direction to, int result) {
-  if (result >= 0 && write_buffers_[to] != nullptr) {
+  if (result > 0 && to == kServer)
+    bytes_sent_ += result;
+
+  if (result >= 0 && write_buffers_[to]) {
     bytes_passed_without_yielding_[from] += result;
     write_buffers_[to]->DidConsume(result);
     int size = write_buffers_[to]->BytesRemaining();

@@ -20,8 +20,6 @@
 #include "net/socket/client_socket_pool_manager.h"
 #include "net/socket/server_socket.h"
 #include "net/socket/stream_socket.h"
-#include "net/tools/naive/http_proxy_socket.h"
-#include "net/tools/naive/naive_proxy_delegate.h"
 #include "net/tools/naive/socks5_server_socket.h"
 
 namespace net {
@@ -111,23 +109,12 @@ void NaiveProxy::HandleAcceptResult(int result) {
 
 void NaiveProxy::DoConnect() {
   std::unique_ptr<StreamSocket> socket;
-  auto* proxy_delegate =
-      static_cast<NaiveProxyDelegate*>(session_->context().proxy_delegate);
-  DCHECK(proxy_delegate);
-  DCHECK(!proxy_info_.is_empty());
-  const auto& proxy_server = proxy_info_.proxy_server();
-  auto padding_detector_delegate = std::make_unique<PaddingDetectorDelegate>(
-      proxy_delegate, proxy_server, protocol_);
-
   if (protocol_ == ClientProtocol::kSocks5) {
     socket = std::make_unique<Socks5ServerSocket>(std::move(accepted_socket_),
                                                   listen_user_, listen_pass_,
                                                   traffic_annotation_);
-  } else if (protocol_ == ClientProtocol::kHttp) {
-    socket = std::make_unique<HttpProxySocket>(std::move(accepted_socket_),
-                                               padding_detector_delegate.get(),
-                                               traffic_annotation_);
-  } else if (protocol_ == ClientProtocol::kRedir) {
+  } else if (protocol_ == ClientProtocol::kRedir ||
+             protocol_ == ClientProtocol::kTproxy) {
     socket = std::move(accepted_socket_);
   } else {
     return;
@@ -136,9 +123,9 @@ void NaiveProxy::DoConnect() {
   last_id_++;
   const auto& nak = network_anonymization_keys_[last_id_ % concurrency_];
   auto connection_ptr = std::make_unique<NaiveConnection>(
-      last_id_, protocol_, std::move(padding_detector_delegate), proxy_info_,
-      server_ssl_config_, proxy_ssl_config_, resolver_, session_, nak, net_log_,
-      std::move(socket), traffic_annotation_);
+      last_id_, protocol_, proxy_info_, server_ssl_config_, proxy_ssl_config_,
+      resolver_, session_, nak, net_log_, std::move(socket),
+      traffic_annotation_);
   auto* connection = connection_ptr.get();
   connection_by_id_[connection->id()] = std::move(connection_ptr);
   int result = connection->Connect(
@@ -190,7 +177,9 @@ void NaiveProxy::Close(unsigned int connection_id, int reason) {
     return;
 
   LOG(INFO) << "Connection " << connection_id
-            << " closed: " << ErrorToShortString(reason);
+            << " closed: " << ErrorToShortString(reason)
+            << ", recv/sent/duration: " << it->second->received() << "/"
+            << it->second->sent() << "/" << it->second->duration();
 
   // The call stack might have callbacks which still have the pointer of
   // connection. Instead of referencing connection with ID all the time,
