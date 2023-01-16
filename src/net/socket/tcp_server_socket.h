@@ -52,6 +52,8 @@ class NET_EXPORT TCPServerSocket : public ServerSocket {
   // the old thread.
   void DetachFromThread();
 
+  void SetTransparent(bool value);
+
  private:
   // Converts |accepted_socket_| and stores the result in
   // |output_accepted_socket|.
@@ -72,6 +74,8 @@ class NET_EXPORT TCPServerSocket : public ServerSocket {
   std::unique_ptr<TCPSocket> accepted_socket_;
   IPEndPoint accepted_address_;
   bool pending_accept_ = false;
+
+  bool transparent_ = false;
 };
 
 }  // namespace net

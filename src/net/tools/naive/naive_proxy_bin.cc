@@ -16,7 +16,6 @@
 #include "base/json/json_file_value_serializer.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
-#include "base/rand_util.h"
 #include "base/run_loop.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_number_conversions.h"
@@ -59,7 +58,6 @@
 #include "net/third_party/quiche/src/quiche/quic/core/quic_versions.h"
 #include "net/tools/naive/naive_protocol.h"
 #include "net/tools/naive/naive_proxy.h"
-#include "net/tools/naive/naive_proxy_delegate.h"
 #include "net/tools/naive/partition_alloc_support.h"
 #include "net/tools/naive/redirect_resolver.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
@@ -230,20 +228,26 @@ bool ParseCommandLine(const CommandLine& cmdline, Params* params) {
   url::AddStandardScheme("socks",
                          url::SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION);
   url::AddStandardScheme("redir", url::SCHEME_WITH_HOST_AND_PORT);
+  url::AddStandardScheme("tproxy", url::SCHEME_WITH_HOST_AND_PORT);
   if (!cmdline.listen.empty()) {
     GURL url(cmdline.listen);
     if (url.scheme() == "socks") {
       params->protocol = net::ClientProtocol::kSocks5;
       params->listen_port = 1080;
-    } else if (url.scheme() == "http") {
-      params->protocol = net::ClientProtocol::kHttp;
-      params->listen_port = 8080;
     } else if (url.scheme() == "redir") {
 #if BUILDFLAG(IS_LINUX)
       params->protocol = net::ClientProtocol::kRedir;
       params->listen_port = 1080;
 #else
       std::cerr << "Redir protocol only supports Linux." << std::endl;
+      return false;
+#endif
+    } else if (url.scheme() == "tproxy") {
+#if BUILDFLAG(IS_LINUX)
+      params->protocol = net::ClientProtocol::kTproxy;
+      params->listen_port = 1080;
+#else
+      std::cerr << "TProxy protocol only supports Linux." << std::endl;
       return false;
 #endif
     } else {
@@ -303,7 +307,8 @@ bool ParseCommandLine(const CommandLine& cmdline, Params* params) {
 
   params->host_resolver_rules = cmdline.host_resolver_rules;
 
-  if (params->protocol == net::ClientProtocol::kRedir) {
+  if (params->protocol == net::ClientProtocol::kRedir ||
+      params->protocol == net::ClientProtocol::kTproxy) {
     std::string range = "100.64.0.0/10";
     if (!cmdline.resolver_range.empty())
       range = cmdline.resolver_range;
@@ -313,6 +318,7 @@ bool ParseCommandLine(const CommandLine& cmdline, Params* params) {
       std::cerr << "Invalid resolver range" << std::endl;
       return false;
     }
+    params->resolver_prefix = std::max(params->resolver_prefix, (size_t)8);
     if (params->resolver_range.IsIPv6()) {
       std::cerr << "IPv6 resolver range not supported" << std::endl;
       return false;
@@ -321,6 +327,16 @@ bool ParseCommandLine(const CommandLine& cmdline, Params* params) {
 
   if (!cmdline.no_log) {
     if (!cmdline.log.empty()) {
+      if (cmdline.log.value() == FILE_PATH_LITERAL("syslog")) {
+        logging::SetLogItems(false, false, false, false);
+        params->log_settings.logging_dest =
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_ANDROID) || \
+    BUILDFLAG(IS_FUCHSIA)
+            logging::LOG_TO_SYSTEM_DEBUG_LOG;
+#else
+            logging::LOG_TO_STDERR;
+#endif
+      }
       params->log_settings.logging_dest = logging::LOG_TO_FILE;
       params->log_settings.log_file_path = cmdline.log.value().c_str();
     } else {
@@ -380,6 +396,31 @@ class PrintingLogObserver : public NetLog::ThreadSafeObserver {
 }  // namespace
 
 namespace {
+class NaiveProxyDelegate : public ProxyDelegate {
+ public:
+  NaiveProxyDelegate(const Params& params) : params_(params) {}
+
+  void OnResolveProxy(const GURL& url,
+                      const std::string& method,
+                      const ProxyRetryInfoMap& proxy_retry_info,
+                      ProxyInfo* result) override {}
+  void OnFallback(const ProxyServer& bad_proxy, int net_error) override {}
+
+  void OnBeforeTunnelRequest(const ProxyServer& proxy_server,
+                             HttpRequestHeaders* extra_headers) override {
+    extra_headers->MergeFrom(params_.extra_headers);
+  }
+
+  Error OnTunnelHeadersReceived(
+      const ProxyServer& proxy_server,
+      const HttpResponseHeaders& response_headers) override {
+    return OK;
+  }
+
+ private:
+  const Params& params_;
+};
+
 std::unique_ptr<URLRequestContext> BuildCertURLRequestContext(NetLog* net_log) {
   URLRequestContextBuilder builder;
 
@@ -426,8 +467,20 @@ std::unique_ptr<URLRequestContext> BuildURLRequestContext(
   builder.SetCertVerifier(
       CertVerifier::CreateDefault(std::move(cert_net_fetcher)));
 
-  builder.set_proxy_delegate(
-      std::make_unique<NaiveProxyDelegate>(params.extra_headers));
+  builder.set_proxy_delegate(std::make_unique<NaiveProxyDelegate>(params));
+
+  HttpNetworkSessionParams httpParams;
+  httpParams.spdy_session_max_recv_window_size = 24 * 1024 * 1024;
+  httpParams.http2_settings.emplace(spdy::SETTINGS_INITIAL_WINDOW_SIZE,
+                                    16 * 1024 * 1024);
+  builder.set_http_network_session_params(httpParams);
+
+  std::string user_agent = base::StringPrintf(
+      "NaiveProxy/%s (%s %s; %s)", version_info::GetVersionNumber().c_str(),
+      base::SysInfo::OperatingSystemName().c_str(),
+      base::SysInfo::OperatingSystemVersion().c_str(),
+      base::SysInfo::OperatingSystemArchitecture().c_str());
+  builder.set_user_agent(user_agent);
 
   auto context = builder.Build();
 
@@ -552,17 +605,23 @@ int main(int argc, char* argv[]) {
   auto listen_socket =
       std::make_unique<net::TCPServerSocket>(net_log, net::NetLogSource());
 
+  if (params.protocol == net::ClientProtocol::kTproxy) {
+    listen_socket->SetTransparent(true);
+  }
+
   int result = listen_socket->ListenWithAddressAndPort(
       params.listen_addr, params.listen_port, kListenBackLog);
   if (result != net::OK) {
     LOG(ERROR) << "Failed to listen: " << result;
     return EXIT_FAILURE;
   }
+
   LOG(INFO) << "Listening on " << params.listen_addr << ":"
             << params.listen_port;
 
   std::unique_ptr<net::RedirectResolver> resolver;
-  if (params.protocol == net::ClientProtocol::kRedir) {
+  if (params.protocol == net::ClientProtocol::kRedir ||
+      params.protocol == net::ClientProtocol::kTproxy) {
     auto resolver_socket =
         std::make_unique<net::UDPServerSocket>(net_log, net::NetLogSource());
     resolver_socket->AllowAddressReuse();
