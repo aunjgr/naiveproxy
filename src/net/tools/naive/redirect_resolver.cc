@@ -23,7 +23,7 @@
 namespace {
 constexpr int kUdpReadBufferSize = 1024;
 constexpr int kResolutionTtl = 60;
-constexpr int kResolutionRecycleTime = 60 * 5;
+constexpr int kResolutionRecycleTime = 60 * 60;
 
 std::string PackedIPv4ToString(uint32_t addr) {
   return net::IPAddress(addr >> 24, addr >> 16, addr >> 8, addr).ToString();

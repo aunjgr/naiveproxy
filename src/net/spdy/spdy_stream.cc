@@ -15,6 +15,7 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
+#include "base/rand_util.h"
 #include "base/strings/abseil_string_conversions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
@@ -186,11 +187,20 @@ std::unique_ptr<spdy::SpdySerializedFrame> SpdyStream::ProduceHeadersFrame() {
   CHECK(request_headers_valid_);
   CHECK_GT(stream_id_, 0u);
 
+  int padding_len = 0;
+  auto it = request_headers_.find(":method");
+  if (it != request_headers_.end() && it->second == "CONNECT") {
+    enable_padding_ = true;
+    padding_len = base::RandInt(32, 64);
+  } else {
+    enable_padding_ = false;
+  }
+
   spdy::SpdyControlFlags flags = (pending_send_status_ == NO_MORE_DATA_TO_SEND)
                                      ? spdy::CONTROL_FLAG_FIN
                                      : spdy::CONTROL_FLAG_NONE;
   std::unique_ptr<spdy::SpdySerializedFrame> frame(session_->CreateHeaders(
-      stream_id_, priority_, flags, std::move(request_headers_),
+      stream_id_, priority_, padding_len, flags, std::move(request_headers_),
       delegate_->source_dependency()));
   request_headers_valid_ = false;
   send_time_ = base::TimeTicks::Now();
@@ -329,7 +339,7 @@ void SpdyStream::IncreaseRecvWindowSize(int32_t delta_window_size) {
   unacked_recv_window_bytes_ += delta_window_size;
   const base::TimeDelta elapsed =
       base::TimeTicks::Now() - last_recv_window_update_;
-  if (unacked_recv_window_bytes_ > max_recv_window_size_ / 2 ||
+  if (unacked_recv_window_bytes_ > max_recv_window_size_ / 4 ||
       elapsed >= session_->TimeToBufferSmallWindowUpdates()) {
     last_recv_window_update_ = base::TimeTicks::Now();
     session_->SendStreamWindowUpdate(
@@ -655,7 +665,10 @@ int SpdyStream::OnDataSent(size_t frame_size) {
   CHECK(io_state_ == STATE_OPEN ||
         io_state_ == STATE_HALF_CLOSED_REMOTE) << io_state_;
 
-  size_t frame_payload_size = frame_size - spdy::kDataFrameMinimumSize;
+  size_t frame_payload_size =
+      frame_size - spdy::kDataFrameMinimumSize - data_padding_len_;
+
+  data_padding_len_ = 0;
 
   CHECK_GE(frame_size, spdy::kDataFrameMinimumSize);
   CHECK_LE(frame_payload_size, spdy::kHttp2DefaultFramePayloadLimit);
@@ -853,10 +866,15 @@ void SpdyStream::QueueNextDataFrame() {
                                   : spdy::DATA_FLAG_NONE;
   int effective_len;
   bool end_stream;
+  if (++sent_data_frames_ <= 8 && enable_padding_) {
+    CHECK_EQ(data_padding_len_, 0) << stream_id_;
+    data_padding_len_ = base::RandInt(1, spdy::kPaddingSizePerFrame);
+  }
   std::unique_ptr<SpdyBuffer> data_buffer(
       session_->CreateDataBuffer(stream_id_, pending_send_data_.get(),
                                  pending_send_data_->BytesRemaining(), flags,
-                                 &effective_len, &end_stream));
+                                 &effective_len, &data_padding_len_,
+                                 &end_stream));
   // We'll get called again by PossiblyResumeIfSendStalled().
   if (!data_buffer)
     return;
@@ -881,6 +899,8 @@ void SpdyStream::QueueNextDataFrame() {
       delegate_->CanGreaseFrameType()) {
     session_->EnqueueGreasedFrame(GetWeakPtr());
   }
+
+  effective_len -= data_padding_len_;
 
   session_->net_log().AddEvent(NetLogEventType::HTTP2_SESSION_SEND_DATA, [&] {
     return NetLogSpdyDataParams(stream_id_, effective_len, end_stream);

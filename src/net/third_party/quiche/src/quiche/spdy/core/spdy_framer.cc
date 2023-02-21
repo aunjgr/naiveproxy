@@ -121,8 +121,7 @@ bool SerializeHeadersGivenEncoding(const SpdyHeadersIR& headers,
   }
 
   if (ret && headers.padding_payload_len() > 0) {
-    std::string padding(headers.padding_payload_len(), 0);
-    ret &= builder.WriteBytes(padding.data(), padding.length());
+    ret &= builder.WriteEmptyBytes(headers.padding_payload_len());
   }
 
   if (!ret) {
@@ -153,8 +152,7 @@ bool SerializePushPromiseGivenEncoding(const SpdyPushPromiseIR& push_promise,
   ok = ok && builder.WriteUInt32(push_promise.promised_stream_id()) &&
        builder.WriteBytes(encoding.data(), encoding.size());
   if (ok && push_promise.padding_payload_len() > 0) {
-    std::string padding(push_promise.padding_payload_len(), 0);
-    ok = builder.WriteBytes(padding.data(), padding.length());
+    ok = builder.WriteEmptyBytes(push_promise.padding_payload_len());
   }
 
   QUICHE_DLOG_IF(ERROR, !ok)
@@ -188,8 +186,7 @@ bool WritePayloadWithContinuation(SpdyFrameBuilder* builder,
   bool ret = builder->WriteBytes(&hpack_encoding[0],
                                  hpack_encoding.size() - bytes_remaining);
   if (padding_payload_len > 0) {
-    std::string padding = std::string(padding_payload_len, 0);
-    ret &= builder->WriteBytes(padding.data(), padding.length());
+    ret &= builder->WriteEmptyBytes(padding_payload_len);
   }
 
   // Tack on CONTINUATION frames for the overflow.
@@ -432,8 +429,7 @@ SpdySerializedFrame SpdyFramer::SerializeData(const SpdyDataIR& data_ir) {
   }
   builder.WriteBytes(data_ir.data(), data_ir.data_len());
   if (data_ir.padding_payload_len() > 0) {
-    std::string padding(data_ir.padding_payload_len(), 0);
-    builder.WriteBytes(padding.data(), padding.length());
+    builder.WriteEmptyBytes(data_ir.padding_payload_len());
   }
   QUICHE_DCHECK_EQ(size_with_padding, builder.length());
   return builder.take();
@@ -975,9 +971,7 @@ bool SpdyFramer::SerializeData(const SpdyDataIR& data_ir,
 
   ok = ok && builder.WriteBytes(data_ir.data(), data_ir.data_len());
   if (data_ir.padding_payload_len() > 0) {
-    std::string padding;
-    padding = std::string(data_ir.padding_payload_len(), 0);
-    ok = ok && builder.WriteBytes(padding.data(), padding.length());
+    ok = ok && builder.WriteEmptyBytes(data_ir.padding_payload_len());
   }
   QUICHE_DCHECK_EQ(size_with_padding, builder.length());
   return ok;

@@ -140,7 +140,7 @@ bool SpdyProxyClientSocket::IsConnected() const {
 
 bool SpdyProxyClientSocket::IsConnectedAndIdle() const {
   return IsConnected() && read_buffer_queue_.IsEmpty() &&
-      spdy_stream_->IsOpen();
+         spdy_stream_->IsOpen();
 }
 
 const NetLogWithSource& SpdyProxyClientSocket::NetLog() const {
@@ -385,10 +385,6 @@ int SpdyProxyClientSocket::DoSendRequest() {
     HttpRequestHeaders proxy_delegate_headers;
     proxy_delegate_->OnBeforeTunnelRequest(proxy_server_,
                                            &proxy_delegate_headers);
-    if (proxy_delegate_headers.HasHeader("fastopen")) {
-      proxy_delegate_headers.RemoveHeader("fastopen");
-      use_fastopen_ = true;
-    }
     request_.extra_headers.MergeFrom(proxy_delegate_headers);
   }
 
@@ -554,12 +550,12 @@ void SpdyProxyClientSocket::OnTrailers(const spdy::Http2HeaderBlock& trailers) {
   NOTREACHED();
 }
 
-void SpdyProxyClientSocket::OnClose(int status)  {
+void SpdyProxyClientSocket::OnClose(int status) {
   was_ever_used_ = spdy_stream_->WasEverUsed();
   spdy_stream_.reset();
 
-  bool connecting = next_state_ != STATE_DISCONNECTED &&
-      next_state_ < STATE_OPEN;
+  bool connecting =
+      next_state_ != STATE_DISCONNECTED && next_state_ < STATE_OPEN;
   if (next_state_ == STATE_OPEN)
     next_state_ = STATE_CLOSED;
   else
