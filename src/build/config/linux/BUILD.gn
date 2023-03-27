@@ -27,6 +27,26 @@ config("compiler") {
       asmflags += [ "-mbranch-protection=pac-ret" ]
     }
   }
+  if (is_musl) {
+    defines = [
+      "_LIBCPP_HAS_MUSL_LIBC",
+      "__UCLIBC__",
+      "__MUSL__",
+    ]
+    cflags = []
+    ldflags = [ "-Wl,--dynamic-linker=/lib/ld-musl-x86_64.so.1" ]
+
+    abi = "musl"
+    if (current_cpu == "arm64") {
+      arch = "aarch64"
+    } else if (current_cpu == "x64") {
+      arch = "x86_64"
+    } else {
+      assert(false, "Architecture not supported")
+    }
+    cflags += [ "--target=$arch-alpine-linux-$abi" ]
+    ldflags += [ "--target=$arch-alpine-linux-$abi" ]
+  }
 }
 
 # This is included by reference in the //build/config/compiler:runtime_library

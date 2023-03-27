@@ -35,12 +35,11 @@ import zlib
 # https://chromium.googlesource.com/chromium/src/+/main/docs/updating_clang.md
 # Reverting problematic clang rolls is safe, though.
 # This is the output of `git describe` and is usable as a commit-ish.
-CLANG_REVISION = 'llvmorg-16-init-17653-g39da55e8'
-CLANG_SUB_REVISION = 2
+CLANG_REVISION = 'llvmorg-17-init-4759-g547e3456'
+CLANG_SUB_REVISION = 1
 
 PACKAGE_VERSION = '%s-%s' % (CLANG_REVISION, CLANG_SUB_REVISION)
-RELEASE_VERSION = '16'
-# TODO(crbug.com/1410101): Bump to 17 in next Clang roll.
+RELEASE_VERSION = '17'
 
 CDS_URL = os.environ.get('CDS_CLANG_BUCKET_OVERRIDE',
     'https://commondatastorage.googleapis.com/chromium-browser-clang')
@@ -233,16 +232,16 @@ def DownloadAndUnpackClangWinRuntime(output_dir):
     sys.exit(1)
 
 
-def UpdatePackage(package_name, host_os):
+def UpdatePackage(package_name, host_os, dir=LLVM_BUILD_DIR):
   stamp_file = None
   package_file = None
 
-  stamp_file = os.path.join(LLVM_BUILD_DIR, package_name + '_revision')
+  stamp_file = os.path.join(dir, package_name + '_revision')
   if package_name == 'clang':
     stamp_file = STAMP_FILE
     package_file = 'clang'
   elif package_name == 'coverage_tools':
-    stamp_file = os.path.join(LLVM_BUILD_DIR, 'cr_coverage_revision')
+    stamp_file = os.path.join(dir, 'cr_coverage_revision')
     package_file = 'llvm-code-coverage'
   elif package_name == 'objdump':
     package_file = 'llvmobjdump'
@@ -279,17 +278,17 @@ def UpdatePackage(package_name, host_os):
 
   # Updating the main clang package nukes the output dir. Any other packages
   # need to be updated *after* the clang package.
-  if package_name == 'clang' and os.path.exists(LLVM_BUILD_DIR):
-    RmTree(LLVM_BUILD_DIR)
+  if package_name == 'clang' and os.path.exists(dir):
+    RmTree(dir)
 
-  DownloadAndUnpackPackage(package_file, LLVM_BUILD_DIR, host_os)
+  DownloadAndUnpackPackage(package_file, dir, host_os)
 
   if package_name == 'clang' and 'mac' in target_os:
-    DownloadAndUnpackClangMacRuntime(LLVM_BUILD_DIR)
+    DownloadAndUnpackClangMacRuntime(dir)
   if package_name == 'clang' and 'win' in target_os:
     # When doing win/cross builds on other hosts, get the Windows runtime
     # libraries, and llvm-symbolizer.exe (needed in asan builds).
-    DownloadAndUnpackClangWinRuntime(LLVM_BUILD_DIR)
+    DownloadAndUnpackClangWinRuntime(dir)
 
   WriteStampFile(expected_stamp, stamp_file)
   return 0
@@ -330,11 +329,6 @@ def main():
   parser.add_argument('--verify-version',
                       help='Verify that clang has the passed-in version.')
   args = parser.parse_args()
-
-  # TODO(crbug.com/1410101): Remove in next Clang roll.
-  if args.llvm_force_head_revision:
-    global RELEASE_VERSION
-    RELEASE_VERSION = '17'
 
   if args.verify_version and args.verify_version != RELEASE_VERSION:
     print('RELEASE_VERSION is %s but --verify-version argument was %s.' % (

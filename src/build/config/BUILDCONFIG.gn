@@ -156,6 +156,7 @@ declare_args() {
   is_robolectric = false
 
   # DON'T ADD MORE FLAGS HERE. Read the comment above.
+  is_musl = false
 }
 
 declare_args() {
