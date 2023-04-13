@@ -7,8 +7,8 @@
 namespace net {
 enum class ClientProtocol {
   kSocks5,
-  kHttp,
   kRedir,
+  kTproxy,
 };
 
 // Adds padding for traffic from this direction.

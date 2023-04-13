@@ -15,7 +15,6 @@
 #include "net/base/completion_once_callback.h"
 #include "net/base/completion_repeating_callback.h"
 #include "net/tools/naive/naive_protocol.h"
-#include "net/tools/naive/naive_proxy_delegate.h"
 
 namespace net {
 
@@ -35,19 +34,17 @@ class NaiveConnection {
  public:
   using TimeFunc = base::TimeTicks (*)();
 
-  NaiveConnection(
-      unsigned int id,
-      ClientProtocol protocol,
-      std::unique_ptr<PaddingDetectorDelegate> padding_detector_delegate,
-      const ProxyInfo& proxy_info,
-      const SSLConfig& server_ssl_config,
-      const SSLConfig& proxy_ssl_config,
-      RedirectResolver* resolver,
-      HttpNetworkSession* session,
-      const NetworkAnonymizationKey& network_anonymization_key,
-      const NetLogWithSource& net_log,
-      std::unique_ptr<StreamSocket> accepted_socket,
-      const NetworkTrafficAnnotationTag& traffic_annotation);
+  NaiveConnection(unsigned int id,
+                  ClientProtocol protocol,
+                  const ProxyInfo& proxy_info,
+                  const SSLConfig& server_ssl_config,
+                  const SSLConfig& proxy_ssl_config,
+                  RedirectResolver* resolver,
+                  HttpNetworkSession* session,
+                  const NetworkAnonymizationKey& network_anonymization_key,
+                  const NetLogWithSource& net_log,
+                  std::unique_ptr<StreamSocket> accepted_socket,
+                  const NetworkTrafficAnnotationTag& traffic_annotation);
   ~NaiveConnection();
   NaiveConnection(const NaiveConnection&) = delete;
   NaiveConnection& operator=(const NaiveConnection&) = delete;
@@ -57,6 +54,11 @@ class NaiveConnection {
   void Disconnect();
   int Run(CompletionOnceCallback callback);
 
+  int duration() const { return (time_func_() - start_time_).InSeconds(); }
+
+  unsigned long received() const { return bytes_received_; }
+  unsigned long sent() const { return bytes_sent_; }
+
  private:
   enum State {
     STATE_CONNECT_CLIENT,
@@ -64,14 +66,6 @@ class NaiveConnection {
     STATE_CONNECT_SERVER,
     STATE_CONNECT_SERVER_COMPLETE,
     STATE_NONE,
-  };
-
-  enum PaddingState {
-    STATE_READ_PAYLOAD_LENGTH_1,
-    STATE_READ_PAYLOAD_LENGTH_2,
-    STATE_READ_PADDING_LENGTH,
-    STATE_READ_PAYLOAD,
-    STATE_READ_PADDING,
   };
 
   void DoCallback(int result);
@@ -93,7 +87,6 @@ class NaiveConnection {
 
   unsigned int id_;
   ClientProtocol protocol_;
-  std::unique_ptr<PaddingDetectorDelegate> padding_detector_delegate_;
   const ProxyInfo& proxy_info_;
   const SSLConfig& server_ssl_config_;
   const SSLConfig& proxy_ssl_config_;
@@ -123,14 +116,13 @@ class NaiveConnection {
   bool can_push_to_server_;
   int early_pull_result_;
 
-  int num_paddings_[kNumDirections];
-  PaddingState read_padding_state_;
-  int payload_length_;
-  int padding_length_;
-
   bool full_duplex_;
 
   TimeFunc time_func_;
+  base::TimeTicks start_time_;
+
+  unsigned long bytes_received_;
+  unsigned long bytes_sent_;
 
   // Traffic annotation for socket control.
   const NetworkTrafficAnnotationTag& traffic_annotation_;
