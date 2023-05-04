@@ -181,7 +181,7 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
   // True if the transport socket has ever sent data.
   bool was_ever_used_ = false;
 
-  bool use_fastopen_ = false;
+  bool use_fastopen_ = true;
   bool read_headers_pending_ = false;
 
   const NetLogWithSource net_log_;
