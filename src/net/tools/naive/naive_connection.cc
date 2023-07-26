@@ -82,6 +82,9 @@ NaiveConnection::NaiveConnection(
       early_pull_result_(ERR_IO_PENDING),
       full_duplex_(false),
       time_func_(&base::TimeTicks::Now),
+      start_time_(time_func_()),
+      bytes_received_(0),
+      bytes_sent_(0),
       traffic_annotation_(traffic_annotation) {
   io_callback_ = base::BindRepeating(&NaiveConnection::OnIOComplete,
                                      weak_ptr_factory_.GetWeakPtr());
@@ -220,7 +223,8 @@ int NaiveConnection::DoConnectServer() {
     const auto* socket =
         static_cast<const HttpProxyServerSocket*>(client_socket_.get());
     origin = socket->request_endpoint();
-  } else if (protocol_ == ClientProtocol::kRedir) {
+  } else if (protocol_ == ClientProtocol::kRedir ||
+             protocol_ == ClientProtocol::kTproxy) {
 #if BUILDFLAG(IS_LINUX)
     const auto* socket =
         static_cast<const TCPClientSocket*>(client_socket_.get());
@@ -235,11 +239,19 @@ int NaiveConnection::DoConnectServer() {
     SockaddrStorage dst;
     if (peer_endpoint.GetFamily() == ADDRESS_FAMILY_IPV4 ||
         peer_endpoint.address().IsIPv4MappedIPv6()) {
-      rv = getsockopt(sd, SOL_IP, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      if (protocol_ == ClientProtocol::kRedir) {
+        rv = getsockopt(sd, SOL_IP, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      } else {
+        rv = getsockname(sd, dst.addr, &dst.addr_len);
+      }
     } else {
-      rv = getsockopt(sd, SOL_IPV6, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      if (protocol_ == ClientProtocol::kRedir) {
+        rv = getsockopt(sd, SOL_IPV6, SO_ORIGINAL_DST, dst.addr, &dst.addr_len);
+      } else {
+        rv = getsockname(sd, dst.addr, &dst.addr_len);
+      }
     }
-    if (rv == 0) {
+    if (rv == OK) {
       IPEndPoint ipe;
       if (ipe.FromSockAddr(dst.addr, dst.addr_len)) {
         const auto& addr = ipe.address();
@@ -273,11 +285,15 @@ int NaiveConnection::DoConnectServer() {
     return ERR_ADDRESS_INVALID;
   }
 
-  LOG(INFO) << "Connection " << id_ << " to " << origin.ToString();
+  IPEndPoint src;
+  client_socket_->GetPeerAddress(&src);
+
+  LOG(INFO) << "Connection " << id_ << " from " << src.ToString() << " to "
+            << origin.ToString();
 
   // Ignores socket limit set by socket pool for this type of socket.
   return InitSocketHandleForRawConnect2(
-      std::move(endpoint), LOAD_IGNORE_LIMITS, MAXIMUM_PRIORITY, session_,
+      std::move(endpoint), LOAD_IGNORE_LIMITS, DEFAULT_PRIORITY, session_,
       proxy_info_, server_ssl_config_, proxy_ssl_config_, PRIVACY_MODE_DISABLED,
       network_anonymization_key_, net_log_, server_socket_handle_.get(),
       io_callback_);
@@ -434,11 +450,17 @@ void NaiveConnection::OnPullComplete(Direction from, Direction to, int result) {
   if (from == kClient && !can_push_to_server_)
     return;
 
+  if (to == kClient)
+    bytes_received_ += result;
+
   Push(from, to, result);
 }
 
 void NaiveConnection::OnPushComplete(Direction from, Direction to, int result) {
-  if (result >= 0 && write_buffers_[to] != nullptr) {
+  if (result > 0 && to == kServer)
+    bytes_sent_ += result;
+
+  if (result >= 0 && write_buffers_[to]) {
     bytes_passed_without_yielding_[from] += result;
     write_buffers_[to]->DidConsume(result);
     int size = write_buffers_[to]->BytesRemaining();

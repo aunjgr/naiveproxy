@@ -131,7 +131,8 @@ void NaiveProxy::DoConnect() {
     socket = std::make_unique<HttpProxyServerSocket>(
         std::move(accepted_socket_), padding_detector_delegate.get(),
         traffic_annotation_, supported_padding_types_);
-  } else if (protocol_ == ClientProtocol::kRedir) {
+  } else if (protocol_ == ClientProtocol::kRedir ||
+             protocol_ == ClientProtocol::kTproxy) {
     socket = std::move(accepted_socket_);
   } else {
     return;
@@ -195,7 +196,9 @@ void NaiveProxy::Close(unsigned int connection_id, int reason) {
     return;
 
   LOG(INFO) << "Connection " << connection_id
-            << " closed: " << ErrorToShortString(reason);
+            << " closed: " << ErrorToShortString(reason)
+            << ", recv/sent/duration: " << it->second->received() << "/"
+            << it->second->sent() << "/" << it->second->duration();
 
   // The call stack might have callbacks which still have the pointer of
   // connection. Instead of referencing connection with ID all the time,

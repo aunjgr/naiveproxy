@@ -58,6 +58,11 @@ class NaiveConnection {
   void Disconnect();
   int Run(CompletionOnceCallback callback);
 
+  int duration() const { return (time_func_() - start_time_).InSeconds(); }
+
+  unsigned long received() const { return bytes_received_; }
+  unsigned long sent() const { return bytes_sent_; }
+
  private:
   enum State {
     STATE_CONNECT_CLIENT,
@@ -127,6 +132,10 @@ class NaiveConnection {
   bool full_duplex_;
 
   TimeFunc time_func_;
+  base::TimeTicks start_time_;
+
+  unsigned long bytes_received_;
+  unsigned long bytes_sent_;
 
   // Traffic annotation for socket control.
   const NetworkTrafficAnnotationTag& traffic_annotation_;

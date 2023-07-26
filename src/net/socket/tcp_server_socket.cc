@@ -4,6 +4,10 @@
 
 #include "net/socket/tcp_server_socket.h"
 
+#if BUILDFLAG(IS_LINUX)
+#include <netinet/in.h>
+#endif
+
 #include <memory>
 #include <utility>
 
@@ -53,6 +57,18 @@ int TCPServerSocket::Listen(const IPEndPoint& address,
     socket_->Close();
     return result;
   }
+
+#if BUILDFLAG(IS_LINUX)
+  if (transparent_) {
+    int sd = socket_->SocketDescriptorForTesting();
+    int opt = 1;
+    result = setsockopt(sd, IPPROTO_IP, IP_TRANSPARENT, &opt, sizeof(opt));
+    if (result != OK) {
+      socket_->Close();
+      return result;
+    }
+  }
+#endif
 
   result = socket_->Bind(address);
   if (result != OK) {
@@ -110,6 +126,10 @@ int TCPServerSocket::Accept(std::unique_ptr<StreamSocket>* socket,
 
 void TCPServerSocket::DetachFromThread() {
   socket_->DetachFromThread();
+}
+
+void TCPServerSocket::SetTransparent(bool val) {
+  transparent_ = val;
 }
 
 int TCPServerSocket::ConvertAcceptedSocket(

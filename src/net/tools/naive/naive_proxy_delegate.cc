@@ -163,7 +163,8 @@ std::optional<PaddingType> PaddingDetectorDelegate::GetClientPaddingType() {
   // protocols.
   if (client_protocol_ == ClientProtocol::kSocks5) {
     return PaddingType::kNone;
-  } else if (client_protocol_ == ClientProtocol::kRedir) {
+  } else if (client_protocol_ == ClientProtocol::kRedir ||
+             client_protocol_ == ClientProtocol::kTproxy) {
     return PaddingType::kNone;
   }
 
